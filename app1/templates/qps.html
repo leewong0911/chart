@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>QPS</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    body { font-family: "Microsoft YaHei", Arial, sans-serif; margin: 20px; background: #fff; }
+    .panel { border: 1px solid #f0f0f0; border-radius: 4px; box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+    .panel-head { display: flex; align-items: center; padding: 10px 16px 0; }
+    .title { font-size: 18px; font-weight: bold; color: #1f1f1f; }
+    .help { display: inline-block; width: 15px; height: 15px; line-height: 14px; text-align: center;
+            border: 1px solid #bbb; border-radius: 50%; color: #bbb; font-size: 11px;
+            font-weight: normal; cursor: pointer; margin-left: 4px; }
+    .head-right { margin-left: auto; display: flex; align-items: center; }
+    .picker { display: flex; align-items: center; border: 1px solid #e5e5e5; border-radius: 16px;
+              padding: 3px 14px 3px 3px; cursor: pointer; user-select: none; }
+    .picker:hover { border-color: #c8c8c8; }
+    .picker-tag { border: 0; background: #eef2fb; color: #4a5da8; font-size: 13px;
+                  padding: 5px 12px; border-radius: 13px; cursor: pointer; }
+    .picker-range { display: flex; align-items: center; gap: 10px; margin-left: 12px;
+                    font-size: 14px; color: #333; }
+    .picker-arrow { color: #bbb; }
+    .close { margin-left: 18px; font-size: 20px; color: #999; cursor: pointer; line-height: 1; }
+    .close:hover { color: #333; }
+    .dropdown { position: absolute; z-index: 20; margin-top: 4px; padding: 10px 14px;
+                background: #fff; border: 1px solid #e5e5e5; border-radius: 4px;
+                box-shadow: 0 4px 16px rgba(0,0,0,.12); display: none; }
+    .dropdown.open { display: block; }
+    .presets { display: flex; flex-wrap: wrap; gap: 8px; max-width: 380px; }
+    .preset { border: 1px solid #e5e5e5; background: #fff; color: #555; font-size: 13px;
+              padding: 4px 10px; border-radius: 3px; cursor: pointer; }
+    .preset:hover { border-color: #4a7cf0; color: #4a7cf0; }
+    .preset.active { background: #4a7cf0; border-color: #4a7cf0; color: #fff; }
+    .custom { display: flex; align-items: center; gap: 6px; margin-top: 10px;
+              padding-top: 10px; border-top: 1px solid #f0f0f0; font-size: 13px; color: #555; }
+    .custom input { border: 1px solid #e5e5e5; border-radius: 3px; padding: 3px 6px; font-size: 13px; }
+    .custom button { border: 0; background: #4a7cf0; color: #fff; font-size: 13px;
+                     padding: 5px 12px; border-radius: 3px; cursor: pointer; }
+    .hint { margin-top: 8px; font-size: 12px; color: #aaa; }
+    #chart { width: 100%; height: 440px; }
+    .tip { color: #999; padding: 40px 20px; text-align: center; }
+    .tip.error { color: #c00; }
+    .reopen { display: none; font-size: 13px; color: #4a7cf0; cursor: pointer; }
+    /* tooltip 内部结构 */
+    .tt { min-width: 180px; font-size: 13px; }
+    .tt-title { color: #333; margin-bottom: 6px; }
+    .tt-row { display: flex; align-items: center; line-height: 22px; }
+    .tt-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; flex: none; }
+    .tt-name { color: #666; }
+    .tt-val { margin-left: auto; padding-left: 24px; color: #333; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <span class="reopen" id="reopen">打开 QPS</span>
+  <div class="panel" id="panel">
+    <div class="panel-head">
+      <div class="title">QPS<span class="help" title="展示各语句类型的每秒请求数">?</span></div>
+      <div class="head-right">
+        <div class="picker" id="picker">
+          <button class="picker-tag" id="pickerTag">自定义</button>
+          <span class="picker-range">
+            <span id="txtStart">--</span>
+            <span class="picker-arrow">→</span>
+            <span id="txtEnd">--</span>
+          </span>
+        </div>
+        <span class="close" id="close" title="关闭">×</span>
+      </div>
+    </div>
+    <div class="dropdown" id="dropdown">
+      <div class="presets" id="presets"></div>
+      <div class="custom">
+        <input type="datetime-local" id="inpStart" step="60">
+        <span>→</span>
+        <input type="datetime-local" id="inpEnd" step="60">
+        <button id="btnApply">确定</button>
+      </div>
+      <div class="hint" id="hint">最大可选跨度 7 天</div>
+    </div>
+    <div id="chart"><div class="tip" id="tip">正在加载数据…</div></div>
+  </div>
+
+  <script>
+    var API_URL = "{% url 'api-qps' %}";
+    var MAX_RANGE_DAYS = 7;
+    var SEC = 1000, MINUTE = 60 * SEC, HOUR = 60 * MINUTE, DAY = 24 * HOUR;
+    var COLORS = {
+      all: '#3a6ff0', select: '#2ec7a9', insert: '#f5a623',
+      update: '#1f3b8f', replace: '#66b1ff'
+    };
+    var PRESETS = [
+      { label: '最近 1 小时', ms: HOUR },
+      { label: '最近 6 小时', ms: 6 * HOUR },
+      { label: '最近 12 小时', ms: 12 * HOUR },
+      { label: '最近 1 天', ms: DAY },
+      { label: '最近 3 天', ms: 3 * DAY },
+      { label: '最近 7 天', ms: 7 * DAY }
+    ];
+
+    var state = { start: null, end: null, label: '自定义' };
+    var chart = null;
+    var meta = null;
+
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+    function toCN(d) {
+      return d.getFullYear() + '年' + pad(d.getMonth() + 1) + '月' + pad(d.getDate()) + '日 '
+        + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    }
+
+    function toParam(d) {
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+        + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    }
+
+    function toInputValue(d) {
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+        + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    }
+
+    function fromInputValue(text) {
+      if (!text) { return null; }
+      var d = new Date(text);
+      return isNaN(d.getTime()) ? null : d;
+    }
+
+    // 解析后端 'YYYY-MM-DD HH:MM:SS'，避开 Safari/IE 对空格分隔格式的兼容坑
+    function parseServer(text) {
+      var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(text);
+      if (!m) { return null; }
+      return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));
+    }
+
+    function showTip(text, isError) {
+      var tip = document.getElementById('tip');
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.id = 'tip';
+        document.getElementById('chart').appendChild(tip);
+      }
+      tip.className = 'tip' + (isError ? ' error' : '');
+      tip.textContent = text;
+    }
+
+    function applyPreset(preset) {
+      state.end = new Date();
+      state.start = new Date(state.end.getTime() - preset.ms);
+      state.label = preset.label;
+      syncPicker();
+      load();
+    }
+
+    function applyCustom(start, end) {
+      if (!start || !end) {
+        setHint('时间格式无法识别', true);
+        return false;
+      }
+      if (start >= end) {
+        setHint('开始时间必须早于结束时间', true);
+        return false;
+      }
+      if (end - start > MAX_RANGE_DAYS * DAY) {
+        setHint('最大可选跨度 ' + MAX_RANGE_DAYS + ' 天', true);
+        return false;
+      }
+      state.start = start;
+      state.end = end;
+      state.label = '自定义';
+      syncPicker();
+      setHint('最大可选跨度 ' + MAX_RANGE_DAYS + ' 天', false);
+      load();
+      return true;
+    }
+
+    function setHint(text, isError) {
+      var hint = document.getElementById('hint');
+      hint.textContent = text;
+      hint.style.color = isError ? '#c00' : '#aaa';
+    }
+
+    function syncPicker() {
+      document.getElementById('pickerTag').textContent = state.label;
+      document.getElementById('txtStart').textContent = toCN(state.start);
+      document.getElementById('txtEnd').textContent = toCN(state.end);
+      document.getElementById('inpStart').value = toInputValue(state.start);
+      document.getElementById('inpEnd').value = toInputValue(state.end);
+      var nodes = document.querySelectorAll('.preset');
+      for (var i = 0; i < nodes.length; i++) {
+        nodes[i].classList.toggle('active', nodes[i].getAttribute('data-label') === state.label);
+      }
+    }
+
+    function buildQuery() {
+      var query = new URLSearchParams();
+      query.set('start', toParam(state.start));
+      query.set('end', toParam(state.end));
+      var metric = new URLSearchParams(location.search).get('metric');
+      if (metric) { query.set('metric', metric); }
+      return query.toString();
+    }
+
+    function fullAt(index) {
+      if (!meta || !meta.base) { return ''; }
+      var d = parseServer(meta.base);
+      return toCN(new Date(d.getTime() + index * meta.stepSec * SEC));
+    }
+
+    function fmtVal(value) {
+      if (value === 0) { return '0'; }
+      return String(Math.round(value * 10000) / 10000);
+    }
+
+    function niceScale(max) {
+      if (!isFinite(max) || max <= 0) { return { max: 1, interval: 0.5 }; }
+      var raw = max / 3;
+      var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+      var norm = raw / mag;
+      var step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag;
+      return { max: Math.ceil(max / step) * step, interval: step };
+    }
+
+    function dataMax(data, names) {
+      var flat = [].concat.apply([], names.map(function (n) { return data.series[n]; }));
+      return flat.length ? Math.max.apply(null, flat) : 0;
+    }
+
+    function tooltipFormatter(params) {
+      if (!params || !params.length) { return ''; }
+      var html = '<div class="tt"><div class="tt-title">' + fullAt(params[0].dataIndex) + '</div>';
+      params.forEach(function (p) {
+        html += '<div class="tt-row">'
+          + '<span class="tt-dot" style="background:' + p.color + '"></span>'
+          + '<span class="tt-name">' + p.seriesName + ':</span>'
+          + '<span class="tt-val">' + fmtVal(p.value) + '</span></div>';
+      });
+      return html + '</div>';
+    }
+
+    function render(data) {
+      var names = data.metrics;
+      meta = data.meta;
+      var scale = niceScale(dataMax(data, names));
+      var option = {
+        tooltip: {
+          trigger: 'axis',
+          backgroundColor: '#fff',
+          borderColor: '#ebebeb',
+          borderWidth: 1,
+          padding: [10, 14],
+          extraCssText: 'box-shadow:0 4px 16px rgba(0,0,0,.12);border-radius:4px;',
+          formatter: tooltipFormatter
+        },
+        axisPointer: { type: 'line', lineStyle: { color: '#d0d0d0', width: 1, type: 'solid' } },
+        legend: { data: names, bottom: 0, itemWidth: 22, itemHeight: 2, icon: 'rect' },
+        grid: { left: 48, right: 24, top: 16, bottom: 56 },
+        xAxis: {
+          type: 'category', boundaryGap: false, data: data.times,
+          axisTick: { show: false },
+          axisLine: { lineStyle: { color: '#e5e5e5' } },
+          axisLabel: { color: '#999', margin: 12 },
+          splitLine: { show: true, lineStyle: { type: 'dashed', color: '#f2f2f2' } }
+        },
+        yAxis: {
+          type: 'value', min: 0, max: scale.max, interval: scale.interval,
+          axisLine: { show: false }, axisTick: { show: false },
+          axisLabel: { color: '#999' },
+          splitLine: { lineStyle: { color: '#f2f2f2' } }
+        },
+        series: names.map(function (name) {
+          return {
+            name: name, type: 'line', data: data.series[name], symbol: 'none',
+            color: COLORS[name] || '#999', lineStyle: { width: 1.2 }
+          };
+        })
+      };
+      if (!chart) {
+        document.getElementById('tip') && document.getElementById('tip').remove();
+        chart = echarts.init(document.getElementById('chart'));
+        window.addEventListener('resize', function () { chart.resize(); });
+      }
+      chart.clear();
+      chart.setOption(option);
+    }
+
+    function load() {
+      showTip('正在加载数据…');
+      fetch(API_URL + '?' + buildQuery(), {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+      }).then(function (resp) {
+        return resp.json().then(function (data) {
+          if (!resp.ok) { throw new Error(data.error || ('接口返回 HTTP ' + resp.status)); }
+          return data;
+        });
+      }).then(function (data) {
+        if (!data.times.length) {
+          meta = null;
+          showTip('该区间无数据，可执行 python manage.py seed_qps --days 7 灌入模拟数据');
+          return;
+        }
+        render(data);
+      }).catch(function (err) {
+        showTip(err.message, true);
+      });
+    }
+
+    function initPresets() {
+      var box = document.getElementById('presets');
+      PRESETS.forEach(function (preset) {
+        var btn = document.createElement('button');
+        btn.className = 'preset';
+        btn.textContent = preset.label;
+        btn.setAttribute('data-label', preset.label);
+        btn.addEventListener('click', function (event) {
+          event.stopPropagation();
+          applyPreset(preset);
+          toggleDropdown(false);
+        });
+        box.appendChild(btn);
+      });
+    }
+
+    function toggleDropdown(open) {
+      var dd = document.getElementById('dropdown');
+      var willOpen = open === undefined ? !dd.classList.contains('open') : open;
+      dd.classList.toggle('open', willOpen);
+      if (willOpen) { positionDropdown(); }
+    }
+
+    function positionDropdown() {
+      var dd = document.getElementById('dropdown');
+      var rect = document.getElementById('picker').getBoundingClientRect();
+      dd.style.left = (rect.left + window.pageXOffset + rect.width - dd.offsetWidth) + 'px';
+    }
+
+    function initEvents() {
+      document.getElementById('picker').addEventListener('click', function (event) {
+        event.stopPropagation();
+        toggleDropdown();
+      });
+      document.getElementById('dropdown').addEventListener('click', function (event) {
+        event.stopPropagation();
+      });
+      document.addEventListener('click', function () { toggleDropdown(false); });
+      document.getElementById('btnApply').addEventListener('click', function () {
+        applyCustom(
+          fromInputValue(document.getElementById('inpStart').value),
+          fromInputValue(document.getElementById('inpEnd').value)
+        );
+      });
+      document.getElementById('close').addEventListener('click', function () {
+        document.getElementById('panel').style.display = 'none';
+        document.getElementById('reopen').style.display = 'inline';
+        toggleDropdown(false);
+      });
+      document.getElementById('reopen').addEventListener('click', function () {
+        document.getElementById('panel').style.display = '';
+        this.style.display = 'none';
+        if (chart) { chart.resize(); }
+      });
+    }
+
+    function initRange() {
+      var params = new URLSearchParams(location.search);
+      var start = parseServer(params.get('start') || '');
+      var end = parseServer(params.get('end') || '');
+      if (start && end) {
+        state.start = start;
+        state.end = end;
+        state.label = '自定义';
+        return;
+      }
+      var preset = PRESETS[0];
+      state.end = new Date();
+      state.start = new Date(state.end.getTime() - preset.ms);
+      state.label = preset.label;
+    }
+
+    initPresets();
+    initEvents();
+    initRange();
+    syncPicker();
+    load();
+  </script>
+</body>
+</html>
